@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3주차 실습 2 — 살아 있는 행성 두 개</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="glcanvas"></canvas>
+
+<script>
+/* ============================================================================
+   3주차 실습 2 — "살아 있는 행성 만들기"
+
+   실습 1 의 장면 구조를 그대로 두고, 프래그먼트 셰이더만 바꿔 자기만의 행성을
+   만듭니다. 이미지 파일은 하나도 쓰지 않고, 픽셀 계산만으로 표면을 그립니다.
+
+   이 파일은 서로 다른 행성 **두 개**를 한 장면에 띄웁니다.
+     · 왼쪽  — "용암이 흐르는 젊은 행성"
+     · 오른쪽 — "오로라가 도는 얼음 행성"
+   같은 프래그먼트 셰이더에 uniform 값(uPlanetType)만 바꿔 행성을 선택합니다.
+
+   ※ vSurf(물체 기준 법선) 를 따로 보내는 이유:
+     무늬는 물체 기준 법선으로, 빛은 세계 기준 법선으로 계산해야
+     행성이 돌 때 무늬가 표면에 붙어서 같이 돕니다.
+   ============================================================================ */
+'use strict';
+
+/* ══════════════════════════════════════════════════════════════════════════
+   1. 메시 데이터 — 구를 만드는 함수
+   ──────────────────────────────────────────────────────────────────────────
+   색은 프래그먼트 셰이더가 계산하므로 (1,1,1) 로 둡니다.
+   무늬가 촘촘해지도록 분할 수를 높였습니다(64×128).
+   ══════════════════════════════════════════════════════════════════════════ */
+function makeSphere(radius, rows, cols, r, g, b) {
+  const pos = [], nrm = [], col = [], idx = [];
+  for (let i = 0; i <= rows; i++) {
+    const phi = Math.PI * i / rows;                  // 0(북극) ~ π(남극)
+    for (let j = 0; j <= cols; j++) {
+      const th = 2 * Math.PI * j / cols;
+      const nx = Math.sin(phi) * Math.cos(th);
+      const ny = Math.cos(phi);
+      const nz = Math.sin(phi) * Math.sin(th);
+      pos.push(nx * radius, ny * radius, nz * radius);
+      nrm.push(nx, ny, nz);                          // 구의 법선은 곧 방향벡터
+      col.push(r, g, b);
+    }
+  }
+  const stride = cols + 1;
+  for (let i = 0; i < rows; i++) {
+    for (let j = 0; j < cols; j++) {
+      const a = i * stride + j, b2 = a + stride;
+      idx.push(a, b2, a + 1, a + 1, b2, b2 + 1);
+    }
+  }
+  return { positions: new Float32Array(pos), normals: new Float32Array(nrm),
+           colors: new Float32Array(col), indices: new Uint16Array(idx) };
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   2. 버텍스 셰이더 — 물체 기준 법선(vSurf) 을 하나 더 내보냅니다
+   ══════════════════════════════════════════════════════════════════════════ */
+const VS_SOURCE = `#version 300 es
+
+layout(location=0) in vec3 aPos;
+layout(location=1) in vec3 aNormal;
+layout(location=3) in vec3 aColor;
+
+uniform float uTime;
+uniform mat4  uModel;
+uniform mat4  uViewProj;
+
+out vec3 vColor;
+out vec3 vNormal;    // 세계 기준 법선 — 빛 계산에 쓴다
+out vec3 vSurf;      // 물체 기준 법선 — 무늬가 행성에 "붙어" 돌게 한다
+
+void main() {
+  vColor  = aColor;
+  vNormal = mat3(uModel) * aNormal;
+  vSurf   = aNormal;                  // 돌리기 전 값이라 무늬가 표면에 고정된다
+  gl_Position = uViewProj * uModel * vec4(aPos, 1.0);
+}
+`;
+
+/* ══════════════════════════════════════════════════════════════════════════
+   3. 프래그먼트 셰이더 — 여기가 이 실습의 본체입니다
+   ──────────────────────────────────────────────────────────────────────────
+   · 잡음 함수(hash31·noise3·fbm) 는 이미지 파일 없이 무늬를 만들기 위한
+     절차적 잡음입니다.
+   · uPlanetType 로 두 행성의 무늬를 선택합니다.
+   ══════════════════════════════════════════════════════════════════════════ */
+const FS_SOURCE = `#version 300 es
+precision highp float;
+
+in vec3 vColor;
+in vec3 vNormal;      // 세계 기준 법선 — 빛 계산에 쓴다
+in vec3 vSurf;        // 물체 기준 법선 — 무늬가 표면에 붙어 돌게 한다
+
+uniform float uTime;
+uniform float uPlanetType;   // 0.0 → 용암 행성, 1.0 → 오로라 얼음 행성
+
+out vec4 fragColor;
+
+/* ── 절차적 잡음 ─────────────────────────────────────────────── */
+// 좌표를 넣으면 언제나 같은 0~1 값을 돌려주는 가짜 난수
+float hash31(vec3 p) {
+  p = fract(p * 0.3183099 + vec3(0.71, 0.113, 0.419));
+  p *= 17.0;
+  return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+// 격자 꼭짓점의 난수를 부드럽게 섞어 "덩어리진" 잡음을 만듭니다
+float noise3(vec3 x) {
+  vec3 i = floor(x), f = fract(x);
+  f = f * f * (3.0 - 2.0 * f);                 // 부드럽게 (smoothstep 과 같은 곡선)
+  return mix(mix(mix(hash31(i + vec3(0,0,0)), hash31(i + vec3(1,0,0)), f.x),
+                 mix(hash31(i + vec3(0,1,0)), hash31(i + vec3(1,1,0)), f.x), f.y),
+             mix(mix(hash31(i + vec3(0,0,1)), hash31(i + vec3(1,0,1)), f.x),
+                 mix(hash31(i + vec3(0,1,1)), hash31(i + vec3(1,1,1)), f.x), f.y), f.z);
+}
+// 크기가 다른 잡음을 여러 겹 더합니다 → 큰 덩어리와 잔 무늬가 함께 생깁니다
+float fbm(vec3 p) {
+  float v = 0.0, a = 0.5;
+  for (int i = 0; i < 5; i++) { v += a * noise3(p); p *= 2.02; a *= 0.5; }
+  return v;
+}
+
+void main() {
+  vec3 N = normalize(vNormal);
+  vec3 S = normalize(vSurf);
+  vec3 L = normalize(vec3(0.7, 0.42, 0.55));   // 광원 쪽 방향
+  float diff = max(dot(N, L), 0.0);            // 낮과 밤의 경계
+
+  float lat = S.y;                             // -1(남극) ~ 1(북극)
+  float lon = atan(S.z, S.x);                  // -π ~ π
+
+  if (uPlanetType < 0.5) {
+    /* ══════════════ 행성 A — 용암이 흐르는 젊은 행성 ══════════════ */
+
+    // 시간에 따라 좌표를 밀어 "표면이 흐르는" 느낌을 준다 (용암이 움직인다)
+    float h = fbm(S * 3.0 + vec3(0.0, uTime * 0.04, 0.0));
+
+    // ① 낮은 지역(계곡)에 용암이 고인다 — h 가 작을수록 붉게
+    float lava = smoothstep(0.55, 0.30, h);
+
+    // ② 갈라진 틈 — |잡음 - 0.5| 가 작은 곳이 곧 균열. 틈으로 용암이 새어 나온다
+    float crack = 1.0 - smoothstep(0.03, 0.11, abs(fbm(S * 12.0 + uTime * 0.15) - 0.5));
+    lava = max(lava, crack);
+
+    // ③ 화산 분출구 — 밝고 뜨거운 점들
+    float vent = smoothstep(0.74, 0.92, fbm(S * 8.0 + vec3(0.0, uTime * 0.08, 0.0)));
+    lava = max(lava, vent * 0.9);
+
+    vec3 crust  = vec3(0.16, 0.11, 0.09);                  // 어두운 현무암 지각
+    vec3 molten = mix(vec3(0.95, 0.30, 0.05), vec3(1.0, 0.75, 0.20), h);  // 용암 색
+    vec3 albedo = mix(crust, molten, lava);
+
+    // 밤면의 용암은 스스로 빛난다 (diff 가 0 인 곳에서도 보인다)
+    vec3 glow = vec3(1.0, 0.40, 0.10) * lava * (1.0 - diff);
+    vec3 color = albedo * (0.08 + 0.92 * diff) + glow * 1.6;
+    fragColor = vec4(color, 1.0);
+
+  } else {
+    /* ══════════════ 행성 B — 오로라가 도는 얼음 행성 ══════════════ */
+
+    float h = fbm(S * 3.2);
+
+    // ① 얼음 — 잡음을 높이로 보고 푸르스름한 얼음색으로
+    vec3 ice = mix(vec3(0.66, 0.76, 0.90), vec3(0.93, 0.96, 1.00), smoothstep(0.30, 0.70, h));
+
+    // ② 갈라진 틈 — 어두운 줄. 절벽이 갈라진 얼음 표면 느낌
+    float crack = 1.0 - smoothstep(0.0, 0.07, abs(fbm(S * 14.0) - 0.5));
+    vec3 albedo = ice * (1.0 - 0.75 * crack);
+
+    // ③ 극관 — 위도가 아주 높은 곳만 더 하얗게
+    albedo = mix(albedo, vec3(0.98, 1.0, 1.0), smoothstep(0.70, 0.86, abs(lat)));
+
+    // ④ 오로라 — 위도가 높은 "띠"에만, 경도 방향으로 흔들리는 리본.
+    //    시간(uTime)이 들어가 리본이 흐르고, fbm 으로 가장자리가 구불거린다.
+    float zone   = smoothstep(0.38, 0.60, abs(lat)) * smoothstep(0.97, 0.62, abs(lat));
+    float ribbon = sin(lon * 6.0 + uTime * 0.9 + fbm(S * 4.0) * 7.0);
+    float aurora = zone * smoothstep(0.25, 0.75, ribbon);
+
+    // 오로라 색 — 녹색과 보라색을 위도에 따라 번갈아
+    vec3 auroraCol = mix(vec3(0.25, 1.00, 0.45), vec3(0.55, 0.30, 1.00),
+                         0.5 + 0.5 * sin(lat * 9.0 + uTime * 0.4));
+
+    // 밤면에서 오로라가 더 선명하다
+    vec3 color = albedo * (0.08 + 0.92 * diff)
+               + auroraCol * aurora * (0.35 + 0.65 * (1.0 - diff)) * 1.3;
+    fragColor = vec4(color, 1.0);
+  }
+}
+`;
+
+/* ── 배경(별) 셰이더 — 화면 전체 사각형 위에 별을 계산으로 그립니다 ── */
+const BG_VS = `#version 300 es
+void main() {
+  // gl_VertexID 0,1,2 → 화면 전체를 덮는 큰 삼각형 하나
+  vec2 p = vec2((gl_VertexID == 1) ? 3.0 : -1.0,
+                (gl_VertexID == 2) ? 3.0 : -1.0);
+  gl_Position = vec4(p, 0.0, 1.0);
+}
+`;
+const BG_FS = `#version 300 es
+precision highp float;
+uniform float uTime;
+uniform vec2  uRes;
+out vec4 fragColor;
+void main() {
+  vec2 frag = gl_FragCoord.xy / uRes.xy;     // 0~1 화면 좌표
+  float cells = 130.0;
+  vec2 cell = floor(frag * cells);           // 몇 번째 칸인가
+  vec2 f = fract(frag * cells);              // 그 칸 안의 위치
+  // 칸마다 다른 난수 → 별의 유무와 반짝임 주기
+  float rand = fract(sin(dot(cell, vec2(12.9898, 78.233))) * 43758.5453);
+  float isStar = step(0.996, rand);
+  float d = length(f - 0.5);                 // 칸 중앙에서 떨어진 정도
+  float disc = smoothstep(0.22, 0.0, d);     // 점(별) 모양
+  float tw = 0.5 + 0.5 * sin(uTime * (0.5 + rand * 4.0) + rand * 100.0);  // 반짝임
+  float b = isStar * disc * (0.25 + 0.75 * tw);
+  fragColor = vec4(vec3(b), 1.0);
+}
+`;
+
+/* ══════════════════════════════════════════════════════════════════════════
+   4. WebGL 준비
+   ══════════════════════════════════════════════════════════════════════════ */
+const canvas = document.getElementById('glcanvas');
+const gl = canvas.getContext('webgl2');
+if (!gl) {
+  document.body.innerHTML =
+    '<p style="color:#fff;font:16px sans-serif;padding:2rem">' +
+    'WebGL2 를 사용할 수 없습니다. 최신 Chrome 또는 Edge 로 열어 주세요.</p>';
+  throw new Error('no webgl2');
+}
+
+function compileShader(type, source) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, source);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    const kind = (type === gl.VERTEX_SHADER) ? '버텍스' : '프래그먼트';
+    throw new Error(kind + ' 셰이더 오류\n' + gl.getShaderInfoLog(s));
+  }
+  return s;
+}
+function createProgram(vsSource, fsSource) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compileShader(gl.VERTEX_SHADER, vsSource));
+  gl.attachShader(p, compileShader(gl.FRAGMENT_SHADER, fsSource));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+    throw new Error('링크 오류\n' + gl.getProgramInfoLog(p));
+  }
+  return p;
+}
+
+// 행성 프로그램
+const program = createProgram(VS_SOURCE, FS_SOURCE);
+const uTimeLoc = gl.getUniformLocation(program, 'uTime');
+const uModelLoc = gl.getUniformLocation(program, 'uModel');
+const uViewProjLoc = gl.getUniformLocation(program, 'uViewProj');
+const uTypeLoc = gl.getUniformLocation(program, 'uPlanetType');
+
+// 배경(별) 프로그램
+const bgProgram = createProgram(BG_VS, BG_FS);
+const bgTimeLoc = gl.getUniformLocation(bgProgram, 'uTime');
+const bgResLoc = gl.getUniformLocation(bgProgram, 'uRes');
+
+// ── 4×4 행렬 도구 (실습 1 과 동일) ──────────────────────────────────────
+const M4 = {};
+M4.identity = function () {
+  return new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+};
+M4.translate = function (tx, ty, tz) {
+  return new Float32Array([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, tx, ty, tz, 1]);
+};
+M4.scale = function (sx, sy, sz) {
+  return new Float32Array([sx, 0, 0, 0, 0, sy, 0, 0, 0, 0, sz, 0, 0, 0, 0, 1]);
+};
+M4.rotateX = function (a) {
+  const c = Math.cos(a), s = Math.sin(a);
+  return new Float32Array([1, 0, 0, 0, 0, c, s, 0, 0, -s, c, 0, 0, 0, 0, 1]);
+};
+M4.rotateY = function (a) {
+  const c = Math.cos(a), s = Math.sin(a);
+  return new Float32Array([c, 0, -s, 0, 0, 1, 0, 0, s, 0, c, 0, 0, 0, 0, 1]);
+};
+M4.multiply = function (a, b) {
+  const out = new Float32Array(16);
+  for (let col = 0; col < 4; col++)
+    for (let row = 0; row < 4; row++) {
+      let sum = 0;
+      for (let k = 0; k < 4; k++) sum += a[k * 4 + row] * b[col * 4 + k];
+      out[col * 4 + row] = sum;
+    }
+  return out;
+};
+
+/* ══════════════════════════════════════════════════════════════════════════
+   5. 버퍼를 만들어 GPU 메모리로 보낸다
+   ══════════════════════════════════════════════════════════════════════════ */
+function createMesh(mesh) {
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+  function attribute(data, location, size) {
+    if (!data) return;
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
+    gl.enableVertexAttribArray(location);
+    gl.vertexAttribPointer(location, size, gl.FLOAT, false, 0, 0);
+  }
+  attribute(mesh.positions, 0, 3);
+  attribute(mesh.normals,   1, 3);
+  attribute(mesh.colors,    3, 3);
+  const ibo = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, mesh.indices, gl.STATIC_DRAW);
+  gl.bindVertexArray(null);
+  return { vao: vao, count: mesh.indices.length };
+}
+
+// 두 행성 모두 같은 구 메시를 공유합니다 (셰이더로만 다르게 그립니다)
+const planet = createMesh(makeSphere(0.85, 64, 128, 1, 1, 1));
+const emptyVao = gl.createVertexArray();   // 배경 그릴 때 쓸 빈 VAO
+
+/* ══════════════════════════════════════════════════════════════════════════
+   6. 매 프레임 그린다
+   ══════════════════════════════════════════════════════════════════════════ */
+const startTime = performance.now();
+
+function render() {
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.floor(canvas.clientWidth * dpr);
+  const h = Math.floor(canvas.clientHeight * dpr);
+  if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+  gl.viewport(0, 0, canvas.width, canvas.height);
+
+  const time = (performance.now() - startTime) / 1000;
+  const aspect = canvas.width / canvas.height;
+
+  // ── 배경(별) 먼저 그린다 — 깊이 테스트를 끈 채 ──
+  gl.disable(gl.DEPTH_TEST);
+  gl.clearColor(0.01, 0.01, 0.04, 1.0);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+  gl.useProgram(bgProgram);
+  gl.uniform1f(bgTimeLoc, time);
+  gl.uniform2f(bgResLoc, canvas.width, canvas.height);
+  gl.bindVertexArray(emptyVao);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  // ── 행성을 그린다 ──
+  gl.enable(gl.DEPTH_TEST);
+
+  // 카메라 — 실습 1 처럼 기본 변환만으로 만듭니다 (약간 위에서 내려다봄)
+  let camera = M4.identity();
+  camera = M4.multiply(M4.rotateX(-0.22), camera);         // 약간 위에서
+  camera = M4.multiply(M4.translate(0, 0, -4.6), camera);  // 뒤로 물러남
+  const perspective = new Float32Array([
+    1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, -1 / 4.6, 0, 0, 0, 1,
+  ]);
+  camera = M4.multiply(perspective, camera);
+  camera = M4.multiply(M4.scale(1 / (1.35 * aspect), 1 / 1.35, -1 / 18), camera);
+  const viewProj = camera;
+
+  gl.useProgram(program);
+  gl.uniform1f(uTimeLoc, time);
+  gl.uniformMatrix4fv(uViewProjLoc, false, viewProj);
+
+  // 왼쪽 — 용암 행성
+  // 자전축을 살짝 기울이고(rotateX), 천천히 자전(rotateY)한 뒤 왼쪽으로 이동
+  let mA = M4.multiply(M4.rotateX(0.25), M4.rotateY(time * 0.14));
+  mA = M4.multiply(M4.translate(-1.65, 0, 0), mA);
+  gl.uniform1f(uTypeLoc, 0.0);
+  gl.uniformMatrix4fv(uModelLoc, false, mA);
+  gl.bindVertexArray(planet.vao);
+  gl.drawElements(gl.TRIANGLES, planet.count, gl.UNSIGNED_SHORT, 0);
+
+  // 오른쪽 — 오로라 얼음 행성
+  let mB = M4.multiply(M4.rotateX(0.25), M4.rotateY(time * 0.10));
+  mB = M4.multiply(M4.translate(1.65, 0, 0), mB);
+  gl.uniform1f(uTypeLoc, 1.0);
+  gl.uniformMatrix4fv(uModelLoc, false, mB);
+  gl.bindVertexArray(planet.vao);
+  gl.drawElements(gl.TRIANGLES, planet.count, gl.UNSIGNED_SHORT, 0);
+
+  gl.bindVertexArray(null);
+
+  requestAnimationFrame(render);
+}
+requestAnimationFrame(render);
+</script>
+</body>
+</html>
