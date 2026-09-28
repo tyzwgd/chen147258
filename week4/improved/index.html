@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>복합 연구시설 — 관찰 지원 뷰어 (개선)</title><link rel="stylesheet" href="demo.css">
+<style>
+.wrap{grid-template-columns:minmax(0,1fr) 20rem;height:100vh;height:100dvh;min-height:500px}.stage{display:grid;grid-template-rows:minmax(240px,1fr) auto auto;align-items:stretch;justify-content:stretch;min-height:0;overflow:auto}.viewport{position:relative;min-height:0}.stage canvas{position:absolute;inset:0;display:block;width:100%;height:100%;max-height:none;cursor:grab}
+canvas:focus-visible{outline:2px solid var(--d-accent);outline-offset:-2px}.readings{padding:10px 14px;white-space:pre-wrap;font:12px/1.6 monospace;color:var(--d-ink)}
+.instructions{padding:0 14px}.tasks{padding-left:22px}.tasks li{margin:9px 0}.actions{display:flex;gap:8px;flex-wrap:wrap}.actions button{flex:1}
+/* ---- 학생 UI: 순회·직교 뷰·진행 상태 ---- */
+#student-ui{display:flex;flex-direction:column;gap:12px;padding:4px 14px 6px}
+.su-section{font:700 12px/1.4 sans-serif;color:var(--d-ink,#1a1f27);margin:2px 0 6px}
+.su-row{display:flex;gap:6px;flex-wrap:wrap}
+.su-btn{flex:1 1 46%;font:600 12px/1 sans-serif;padding:8px 6px;border:1px solid var(--d-line,#c6ccd6);border-radius:6px;background:var(--d-panel,#f7f8fa);color:var(--d-ink,#1a1f27);cursor:pointer}
+.su-btn:hover{border-color:var(--d-accent,#2f6fd6)}
+.su-btn.on{background:var(--d-accent,#2f6fd6);border-color:var(--d-accent,#2f6fd6);color:#fff}
+.su-check{display:flex;align-items:center;gap:6px;font:12px/1.4 sans-serif;color:var(--d-ink,#1a1f27);padding:3px 0}
+.su-check input{accent-color:var(--d-accent,#2f6fd6)}
+.su-progress{font:12px/1.4 monospace;color:var(--d-ink,#1a1f27)}
+.su-status{font:12px/1.5 monospace;color:var(--d-ink,#1a1f27);background:var(--d-line,#dfe3ea);border-radius:6px;padding:6px 8px;white-space:pre-wrap}
+/* 기준선 오버레이 */
+#ref-line{position:absolute;inset:0;pointer-events:none}
+#ref-line .rl{position:absolute;background:#ff3b30;box-shadow:0 0 0 1px #fff6;z-index:2}
+#ref-line .rlabel{position:absolute;font:700 11px/1 sans-serif;color:#ff3b30;background:rgba(255,255,255,.75);padding:1px 4px;border-radius:3px;z-index:2}
+#mode-tag{position:absolute;top:8px;left:8px;font:700 12px/1 sans-serif;color:#fff;background:rgba(20,26,38,.78);padding:4px 8px;border-radius:4px;z-index:3;pointer-events:none}
+@media(max-width:900px){.wrap{display:block;height:auto}.panel{border-left:0;max-height:none}.stage{height:100vh;height:100dvh;min-height:500px}}
+</style></head><body>
+<div class="wrap"><div class="stage">
+<div class="viewport"><canvas id="cv" tabindex="0" aria-label="다층 연구시설의 3차원 모델. 순회 버튼으로 지점 이동, O1·O2 직교 비교, 드래그로 회전">WebGL2를 지원하는 브라우저에서 실행하세요.</canvas><div id="mode-tag"></div><div id="ref-line"></div></div>
+<p class="instructions">빠른 이동: P1\~P6 버튼 → 읽기 좋은 위치로 카메라 이동 · O1/O2 → 전면·측면 직교 비교<br>기본 조작: 드래그 회전 · Shift 드래그 이동 · 휠 거리 · Home 전체 보기</p>
+<pre class="readings" id="readings"></pre></div>
+<div class="panel"><h1>복합 연구시설 관찰 — 개선 버전</h1><p class="sub">시설을 처음 보는 점검자가 여섯 장치의 정보와 두 구조 비교를 빠짐없이 확인하도록, 지점 순회·전면/측면 직교 뷰·진행 상태를 제공합니다.</p>
+<div class="actions"><button class="btn" id="home" type="button">전체 보기</button><button class="btn" id="measure" type="button">측정 시작 / 초기화</button></div>
+<ol class="tasks" id="tasks"></ol><div id="student-ui"></div>
+<p class="note">P1\~P6 버튼은 각 명판이 글자를 읽을 수 있는 거리·방향에서 장치와 함께 보이게 카메라를 이동합니다. O1·O2는 같은 배율의 전면/측면 직교 화면으로 높이·폭·돌출을 비교합니다.</p>
+
+</div></div>
+<script src="demo.js"></script><script src="d04-inspection-model.js?v=3f1b6bc733"></script><script src="d04-inspection-controls.js"></script><script src="d04-inspection-viewer.js?v=8a4c2fbf62"></script><script src="d04-inspection-student.js?v=e71bc4da3b"></script>
+</body></html>
