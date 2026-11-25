@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>3주차 실습 2 — 용암 행성</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #0b0f16; }
+  canvas { display: block; width: 100vw; height: 100vh; }
+</style>
+</head>
+<body>
+<canvas id="glcanvas"></canvas>
+
+<script>
+/* ============================================================================
+   3주차 실습 2 — 용암 행성 파일
+
+   WebGL2 로 3차원 물체를 그리는 실습입니다.
+   이 파일 하나에 세 개의 프로그램이 모두 들어 있습니다.
+
+     ① 메인 애플리케이션 — 이 <script> 안의 JavaScript (CPU 에서 실행)
+     ② 버텍스 셰이더    — 아래 VS_SOURCE 문자열     (GPU 에서 실행)
+     ③ 프래그먼트 셰이더 — 아래 FS_SOURCE 문자열     (GPU 에서 실행)
+
+   강의 자료의 「실습 1」 을 보며 단계별로 고쳐 나가면 됩니다.
+   ============================================================================ */
+'use strict';
+
+/* ══════════════════════════════════════════════════════════════════════════
+   1. 메시 데이터 — 이 숫자들이 전부입니다
+   ──────────────────────────────────────────────────────────────────────────
+   각 버퍼의 "같은 번째" 값이 같은 정점의 정보입니다.
+   예를 들어 정점 0 은 위치 (-0.75,-0.55,0), 법선 (0,0,1), 색 (0.92,0.35,0.32).
+   ══════════════════════════════════════════════════════════════════════════ */
+// 직육면체: 면마다 위치와 법선을 따로 저장한다.
+function makeBox(sx, sy, sz, r, g, b) {
+  const x=sx/2, y=sy/2, z=sz/2;
+  const positions=[], normals=[], colors=[], indices=[];
+  function face(n, a, b0, c, d) {
+    const k=positions.length/3;
+    for (const v of [a,b0,c,d]) { positions.push(...v); normals.push(...n); colors.push(r,g,b); }
+    indices.push(k,k+1,k+2,k,k+2,k+3);
+  }
+  face([1,0,0],[x,-y,-z],[x,y,-z],[x,y,z],[x,-y,z]);
+  face([-1,0,0],[-x,-y,z],[-x,y,z],[-x,y,-z],[-x,-y,-z]);
+  face([0,1,0],[-x,y,-z],[-x,y,z],[x,y,z],[x,y,-z]);
+  face([0,-1,0],[-x,-y,z],[-x,-y,-z],[x,-y,-z],[x,-y,z]);
+  face([0,0,1],[-x,-y,z],[x,-y,z],[x,y,z],[-x,y,z]);
+  face([0,0,-1],[x,-y,-z],[-x,-y,-z],[-x,y,-z],[x,y,-z]);
+  return {positions:new Float32Array(positions), normals:new Float32Array(normals), colors:new Float32Array(colors), indices:new Uint16Array(indices)};
+}
+// 구: 위도와 경도를 나누고 이웃 정점으로 삼각형을 만든다.
+function makeSphere(radius, rows, cols, r, g, b) {
+  const positions=[], normals=[], colors=[], indices=[];
+  for(let i=0;i<=rows;i++) {
+    const theta=Math.PI*i/rows;
+    for(let j=0;j<=cols;j++) {
+      const phi=2*Math.PI*j/cols;
+      const x=Math.sin(theta)*Math.cos(phi), y=Math.cos(theta), z=Math.sin(theta)*Math.sin(phi);
+      positions.push(radius*x,radius*y,radius*z); normals.push(x,y,z); colors.push(r,g,b);
+    }
+  }
+  for(let i=0;i<rows;i++) for(let j=0;j<cols;j++) {
+    const a=i*(cols+1)+j, c=a+cols+1;
+    indices.push(a,a+1,c,c,a+1,c+1);
+  }
+  return {positions:new Float32Array(positions), normals:new Float32Array(normals), colors:new Float32Array(colors), indices:new Uint16Array(indices)};
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+   2. 버텍스 셰이더 — 정점 하나마다 한 번씩 실행됩니다
+   ══════════════════════════════════════════════════════════════════════════ */
+const VS_SOURCE = `#version 300 es
+
+layout(location=0) in vec3 aPos;      // 정점 위치 버퍼에서 들어온다
+layout(location=1) in vec3 aNormal;   // 법선 버퍼
+layout(location=3) in vec3 aColor;    // 정점 색 버퍼
+
+uniform float uTime;                  // 초 단위 시간
+uniform mat4 uModel;                   // 물체의 변환
+uniform mat4 uViewProj;                // 카메라와 투영
+
+out vec3 vColor;                      // 프래그먼트 셰이더로 넘길 값
+out vec3 vNormal;
+out vec3 vSurf;                        // 물체 기준 표면 방향
+
+void main() {
+  vColor  = aColor;
+  vNormal = mat3(uModel) * aNormal;
+  vSurf = aNormal;
+
+  // gl_Position 에 넣는 값이 그 정점의 최종 위치(NDC)입니다.
+  // 모델 행렬과 카메라 행렬로 정점을 화면에 배치한다.
+  gl_Position = uViewProj * uModel * vec4(aPos, 1.0);
+}
+`;
+
+/* ══════════════════════════════════════════════════════════════════════════
+   3. 프래그먼트 셰이더 — 픽셀 하나마다 한 번씩 실행됩니다
+   ══════════════════════════════════════════════════════════════════════════ */
+const FS_SOURCE = `#version 300 es
+precision highp float;
+in vec3 vColor;
+in vec3 vNormal;
+in vec3 vSurf;
+uniform float uTime;
+out vec4 fragColor;
+void main() {
+  vec3 S=normalize(vSurf);
+  vec3 N=normalize(vNormal);
+  vec3 L=normalize(vec3(-0.6,0.7,1.0));
+  float d=max(dot(N,L),0.0);
+  // 휘어진 사인파의 경계에서 용암이 흐른다.
+  float f=sin(12.0*S.x+3.0*sin(9.0*S.z))+sin(14.0*S.y+2.0*sin(8.0*S.x));
+  float lava=1.0-smoothstep(0.10,0.38,abs(f));
+  float rockPattern=0.5+0.5*sin(38.0*S.x)*sin(35.0*S.y)*sin(33.0*S.z);
+  vec3 rock=mix(vec3(0.12,0.045,0.035),vec3(0.38,0.15,0.08),rockPattern);
+  // 시간과 위치가 용암의 밝기와 색을 바꾼다.
+  float pulse=0.5+0.5*sin(uTime*2.2+8.0*S.y+6.0*S.z);
+  vec3 hot=mix(vec3(0.85,0.10,0.015),vec3(1.0,0.70,0.08),pulse);
+  vec3 color=rock*(0.10+0.90*d)+lava*hot*(0.32+0.68*d);
+  fragColor=vec4(color,1.0);
+}`;
+
+/* ══════════════════════════════════════════════════════════════════════════
+   4. WebGL 준비
+   ══════════════════════════════════════════════════════════════════════════ */
+const canvas = document.getElementById('glcanvas');
+const gl = canvas.getContext('webgl2');
+if (!gl) {
+  document.body.innerHTML =
+    '<p style="color:#fff;font:16px sans-serif;padding:2rem">' +
+    'WebGL2 를 사용할 수 없습니다. 최신 Chrome 또는 Edge 로 열어 주세요.</p>';
+  throw new Error('no webgl2');
+}
+
+// 셰이더 문자열을 컴파일한다. 실패하면 오류에 "몇 줄"인지 나온다.
+function compileShader(type, source) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, source);
+  gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+    const kind = (type === gl.VERTEX_SHADER) ? '버텍스' : '프래그먼트';
+    throw new Error(kind + ' 셰이더 오류\n' + gl.getShaderInfoLog(s));
+  }
+  return s;
+}
+
+// 두 셰이더를 하나의 "프로그램" 으로 묶는다.
+function createProgram(vsSource, fsSource) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compileShader(gl.VERTEX_SHADER, vsSource));
+  gl.attachShader(p, compileShader(gl.FRAGMENT_SHADER, fsSource));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) {
+    throw new Error('링크 오류\n' + gl.getProgramInfoLog(p));
+  }
+  return p;
+}
+
+const program = createProgram(VS_SOURCE, FS_SOURCE);
+
+// uniform 의 "위치"를 이름으로 찾아 둔다. 매 프레임 찾으면 느리다.
+const uTimeLoc = gl.getUniformLocation(program, 'uTime');
+const uModelLoc = gl.getUniformLocation(program, 'uModel');
+const uViewProjLoc = gl.getUniformLocation(program, 'uViewProj');
+// 열 우선(column-major) 4×4 행렬 도구. 오른쪽 행렬부터 적용한다.
+const M4 = {
+  identity:()=>new Float32Array([1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1]),
+  translate(x,y,z) { const m=this.identity(); m[12]=x;m[13]=y;m[14]=z;return m; },
+  scale(x,y,z) { return new Float32Array([x,0,0,0, 0,y,0,0, 0,0,z,0, 0,0,0,1]); },
+  rotateX(t) { const c=Math.cos(t),s=Math.sin(t);return new Float32Array([1,0,0,0, 0,c,s,0, 0,-s,c,0, 0,0,0,1]); },
+  rotateY(t) { const c=Math.cos(t),s=Math.sin(t);return new Float32Array([c,0,-s,0, 0,1,0,0, s,0,c,0, 0,0,0,1]); },
+  rotateZ(t) { const c=Math.cos(t),s=Math.sin(t);return new Float32Array([c,s,0,0, -s,c,0,0, 0,0,1,0, 0,0,0,1]); },
+  mul(a,b) { const m=new Float32Array(16);for(let j=0;j<4;j++)for(let i=0;i<4;i++)for(let k=0;k<4;k++)m[j*4+i]+=a[k*4+i]*b[j*4+k];return m; }
+};
+
+
+/* ══════════════════════════════════════════════════════════════════════════
+   5. 버퍼를 만들어 GPU 메모리로 보낸다
+   ──────────────────────────────────────────────────────────────────────────
+   VAO(Vertex Array Object) 는 "어떤 버퍼를 몇 번 자리에 어떻게 읽을지"를
+   한 묶음으로 기억해 두는 것입니다. 그려야 할 때 이것만 bind 하면 됩니다.
+   ══════════════════════════════════════════════════════════════════════════ */
+function createMesh(mesh) {
+  const vao = gl.createVertexArray();
+  gl.bindVertexArray(vao);
+
+  function attribute(data, location, size) {
+    if (!data) return;
+    const buf = gl.createBuffer();
+    gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+    gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);   // ← CPU 에서 GPU 로 복사
+    gl.enableVertexAttribArray(location);
+    gl.vertexAttribPointer(location, size, gl.FLOAT, false, 0, 0);
+  }
+  attribute(mesh.positions, 0, 3);   // location 0 ← aPos
+  attribute(mesh.normals,   1, 3);   // location 1 ← aNormal
+  attribute(mesh.colors,    3, 3);   // location 3 ← aColor
+
+  const ibo = gl.createBuffer();
+  gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ibo);
+  gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, mesh.indices, gl.STATIC_DRAW);
+
+  gl.bindVertexArray(null);
+  return { vao: vao, count: mesh.indices.length };
+}
+
+const planet = createMesh(makeSphere(1.3, 64, 128, 1.0, 1.0, 1.0));
+
+/* ══════════════════════════════════════════════════════════════════════════
+   6. 매 프레임 그린다
+   ══════════════════════════════════════════════════════════════════════════ */
+function draw(mesh, model) {
+  gl.uniformMatrix4fv(uModelLoc,false,model);
+  gl.bindVertexArray(mesh.vao);
+  gl.drawElements(gl.TRIANGLES,mesh.count,gl.UNSIGNED_SHORT,0);
+  gl.bindVertexArray(null);
+}
+const startTime = performance.now();
+
+function render() {
+  // 캔버스 크기를 화면에 맞춘다 (고해상도 화면 대응)
+  const dpr = window.devicePixelRatio || 1;
+  const w = Math.floor(canvas.clientWidth * dpr);
+  const h = Math.floor(canvas.clientHeight * dpr);
+  if (canvas.width !== w || canvas.height !== h) {
+    canvas.width = w;
+    canvas.height = h;
+  }
+  gl.viewport(0, 0, canvas.width, canvas.height);
+
+  // 화면을 지운다
+  gl.enable(gl.DEPTH_TEST);
+  gl.clearColor(0.012,0.019,0.035,1.0);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+  const time = (performance.now() - startTime) / 1000;
+
+  gl.useProgram(program);                 // ← uniform 을 넣기 전에 반드시 먼저!
+  gl.uniform1f(uTimeLoc, time);
+
+  // 바닥을 없애 우주 공간처럼 보이게 한다.
+  const aspect=canvas.width/Math.max(canvas.height,1);
+  const fit=Math.min(1,aspect);
+  const viewProj=M4.scale(0.56*fit/aspect,0.56*fit,-0.30);
+  gl.uniformMatrix4fv(uViewProjLoc,false,viewProj);
+  const model=M4.mul(M4.rotateZ(-0.20),M4.rotateY(time*0.24));
+  draw(planet,model);
+
+  requestAnimationFrame(render);
+}
+requestAnimationFrame(render);
+</script>
+</body>
+</html>
